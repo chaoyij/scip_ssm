@@ -54,7 +54,8 @@ class HashVectorEmbeddingBag(nn.Module):
             self.hashed_weight = _weight
             self.hashed_weight_size = self.hashed_weight.shape[0] # number of rows in the hashed table
         
-        self.weight_idx = self.xxhash_func(self.hashed_weight_size, self.num_embeddings, "idxW")
+        # self.weight_idx = self.xxhash_func(self.hashed_weight_size, self.num_embeddings, "idxW")
+        self.weight_idx = self.linear_hash_func(self.hashed_weight_size, self.num_embeddings, "idxW")
 
 
     def xxhash_func(self, hN, size_out, extra_str=''):
@@ -98,7 +99,8 @@ class HashVectorEmbeddingBag(nn.Module):
         print("Using linear hash...")
         idx = torch.LongTensor(size_out)
         for i in range(size_out):
-            idx[i] = (i * hN) % hN
+            # idx[i] = (i * hN) % hN
+            idx[i] = i % hN
         return idx
 
     def forward(self, x, offsets=None):
@@ -206,7 +208,7 @@ class MultiUpdateHashVectorEmbeddingBag(nn.Module):
 
 def hashEmbeddingBagTest():
     # test hashEmbeddingBag
-    embedding_bag = HashVectorEmbeddingBag(10, 5, 1.0)
+    embedding_bag = HashVectorEmbeddingBag(10, 5, 0.5)
     # test_input = torch.randint(0, 10, torch.Size([5,]))
     # print("Test input", test_input)
     print("Embedding weight before forward: ", embedding_bag.hashed_weight)
@@ -214,7 +216,7 @@ def hashEmbeddingBagTest():
     print("Embedding weight after forward: ", embedding_bag.hashed_weight)
 
     # the original EmbeddingBag
-    n, m = 10, 5
+    n, m = 5, 5
     emb = nn.EmbeddingBag(n, m, mode="sum", sparse=True)
     emb.weight.data = embedding_bag.hashed_weight.data.reshape(n,m)
     # initialize embeddings

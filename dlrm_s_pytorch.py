@@ -81,6 +81,7 @@ import torch.nn as nn
 from torch.nn.parallel.parallel_apply import parallel_apply
 from torch.nn.parallel.replicate import replicate
 from torch.nn.parallel.scatter_gather import gather, scatter
+from torch.autograd.profiler import record_function
 # quotient-remainder trick
 from tricks.qr_embedding_bag import QREmbeddingBag
 # mixed-dimension trick
@@ -89,8 +90,8 @@ from tricks.hash_embedding_bag import HashEmbeddingBag
 # from tricks.hash_embedding_bag_multi_update import HashEmbeddingBagMultiUpdate
 from tricks.hash_vector_embedding_bag import HashVectorEmbeddingBag, MultiUpdateHashVectorEmbeddingBag
 import hashedEmbeddingBag
-from tricks.lsh_pretraining import getBigMinHashTable
-from tricks.lsh_embedding_bag import LshEmbeddingBag, LshEmbeddingBigBag
+# from tricks.lsh_pretraining import getBigMinHashTable
+# from tricks.lsh_embedding_bag import LshEmbeddingBag, LshEmbeddingBigBag
 import os
 #from torchvision import models
 # from torchsummary import summary
@@ -220,8 +221,8 @@ class DLRM_Net(nn.Module):
                 EE.embs.weight.data = torch.tensor(W, requires_grad=True)
 
             elif self.rand_hash_emb_flag:
-                EE = hashedEmbeddingBag.HashedEmbeddingBag(n, m, self.rand_hash_compression_rate, "sum")
-                # EE = HashVectorEmbeddingBag(n, m)
+                # EE = hashedEmbeddingBag.HashedEmbeddingBag(n, m, self.rand_hash_compression_rate, "sum")
+                EE = HashVectorEmbeddingBag(n, m, self.rand_hash_compression_rate)
 
             elif self.lsh_emb_flag:
                 print("Generating lsh embedding, rate: ", self.lsh_emb_compression_rate)
@@ -665,6 +666,9 @@ if __name__ == "__main__":
 
     if args.mlperf_logging:
         print('command line args: ', json.dumps(vars(args)))
+    if args.rand_hash_emb_flag:
+        print("use rand_hash_emb")
+        print(f"args.rand_hash_compression_rate: {args.rand_hash_compression_rate}")
 
     # print("+++++======++++++======args.rand_hash_emb_flag: ", args.rand_hash_emb_flag, )
 
@@ -1040,7 +1044,7 @@ if __name__ == "__main__":
         )
 
     print("time/loss/accuracy (if enabled):")
-    with torch.autograd.profiler.profile(args.enable_profiling, use_gpu) as prof:
+    with torch.autograd.profiler.profile(args.enable_profiling, use_cuda=use_gpu, record_shapes=True) as prof:
         iter_num = 0
         while k < args.nepochs:
             if k < skip_upto_epoch:
@@ -1174,11 +1178,10 @@ if __name__ == "__main__":
                     test_accu = 0
                     test_loss = 0
                     test_samp = 0
+                    scores = []
+                    targets = []
 
                     accum_test_time_begin = time_wrap(use_gpu)
-                    if args.mlperf_logging:
-                        scores = []
-                        targets = []
 
                     for i, (X_test, lS_o_test, lS_i_test, T_test) in enumerate(test_data_loader):
                         # early exit if nbatches was set by the user and was exceeded
@@ -1191,89 +1194,101 @@ if __name__ == "__main__":
                         Z_test = dlrm_wrap(
                             X_test, lS_o_test, lS_i_test, use_gpu, device
                         )
-                        if args.mlperf_logging:
+                        with record_function("DLRM accuracy compute"):
                             S_test = Z_test.detach().cpu().numpy()  # numpy array
                             T_test = T_test.detach().cpu().numpy()  # numpy array
                             scores.append(S_test)
                             targets.append(T_test)
-                        else:
-                            # loss
-                            E_test = loss_fn_wrap(Z_test, T_test, use_gpu, device)
+                        # else:
+                        #     # loss
+                            # E_test = loss_fn_wrap(Z_test, T_test, use_gpu, device)
 
-                            # compute loss and accuracy
-                            L_test = E_test.detach().cpu().numpy()  # numpy array
-                            S_test = Z_test.detach().cpu().numpy()  # numpy array
-                            T_test = T_test.detach().cpu().numpy()  # numpy array
+                        #     # compute loss and accuracy
+                            # L_test = E_test.detach().cpu().numpy()  # numpy array
+                        #     S_test = Z_test.detach().cpu().numpy()  # numpy array
+                        #     T_test = T_test.detach().cpu().numpy()  # numpy array
                             mbs_test = T_test.shape[0]  # = mini_batch_size except last
                             A_test = np.sum((np.round(S_test, 0) == T_test).astype(np.uint8))
                             test_accu += A_test
-                            test_loss += L_test * mbs_test
+                            # test_loss += L_test * mbs_test
                             test_samp += mbs_test
 
-                        t2_test = time_wrap(use_gpu)
+                        # t2_test = time_wrap(use_gpu)
 
-                    if args.mlperf_logging:
-                        scores = np.concatenate(scores, axis=0)
-                        targets = np.concatenate(targets, axis=0)
+                    
+                    scores = np.concatenate(scores, axis=0)
+                    targets = np.concatenate(targets, axis=0)
 
-                        metrics = {
-                            'loss' : sklearn.metrics.log_loss,
-                            'recall' : lambda y_true, y_score:
-                            sklearn.metrics.recall_score(
-                                y_true=y_true,
-                                y_pred=np.round(y_score)
-                            ),
-                            'precision' : lambda y_true, y_score:
-                            sklearn.metrics.precision_score(
-                                y_true=y_true,
-                                y_pred=np.round(y_score)
-                            ),
-                            'f1' : lambda y_true, y_score:
-                            sklearn.metrics.f1_score(
-                                y_true=y_true,
-                                y_pred=np.round(y_score)
-                            ),
-                            'ap' : sklearn.metrics.average_precision_score,
-                            'roc_auc' : sklearn.metrics.roc_auc_score,
-                            'accuracy' : lambda y_true, y_score:
-                            sklearn.metrics.accuracy_score(
-                                y_true=y_true,
-                                y_pred=np.round(y_score)
-                            ),
-                            # 'pre_curve' : sklearn.metrics.precision_recall_curve,
-                            # 'roc_curve' :  sklearn.metrics.roc_curve,
-                        }
+                    metrics = {
+                        'loss' : sklearn.metrics.log_loss,
+                        'recall' : lambda y_true, y_score:
+                        sklearn.metrics.recall_score(
+                            y_true=y_true,
+                            y_pred=np.round(y_score)
+                        ),
+                        'precision' : lambda y_true, y_score:
+                        sklearn.metrics.precision_score(
+                            y_true=y_true,
+                            y_pred=np.round(y_score)
+                        ),
+                        'f1' : lambda y_true, y_score:
+                        sklearn.metrics.f1_score(
+                            y_true=y_true,
+                            y_pred=np.round(y_score)
+                        ),
+                        'ap' : sklearn.metrics.average_precision_score,
+                        'roc_auc' : sklearn.metrics.roc_auc_score,
+                        'accuracy' : lambda y_true, y_score:
+                        sklearn.metrics.accuracy_score(
+                            y_true=y_true,
+                            y_pred=np.round(y_score)
+                        ),
+                        # 'pre_curve' : sklearn.metrics.precision_recall_curve,
+                        # 'roc_curve' :  sklearn.metrics.roc_curve,
+                    }
 
-                        # print("Compute time for validation metric : ", end="")
-                        # first_it = True
-                        validation_results = {}
-                        for metric_name, metric_function in metrics.items():
-                            # if first_it:
-                            #     first_it = False
-                            # else:
-                            #     print(", ", end="")
-                            # metric_compute_start = time_wrap(False)
-                            validation_results[metric_name] = metric_function(
-                                targets,
-                                scores
-                            )
-                            # metric_compute_end = time_wrap(False)
-                            # met_time = metric_compute_end - metric_compute_start
-                            # print("{} {:.4f}".format(metric_name, 1000 * (met_time)),
-                            #      end="")
-                        # print(" ms")
+                    # print("Compute time for validation metric : ", end="")
+                    # first_it = True
+                    validation_results = {}
+                    for metric_name, metric_function in metrics.items():
+                        # if first_it:
+                        #     first_it = False
+                        # else:
+                        #     print(", ", end="")
+                        # metric_compute_start = time_wrap(False)
+                        validation_results[metric_name] = metric_function(
+                            targets,
+                            scores
+                        )
+                        # metric_compute_end = time_wrap(False)
+                        # met_time = metric_compute_end - metric_compute_start
+                        # print("{} {:.4f}".format(metric_name, 1000 * (met_time)),
+                        #      end="")
+                    # print(" ms")
 
-                        for metric_name, _ in metrics.items():
-                            summaryWriter.add_scalar("test/" + metric_name, validation_results[metric_name], iter_num)
-                        g_accuracy_test = validation_results['accuracy']
-                        g_loss_test = validation_results['loss']
-                    else:
-                        g_accuracy_test = test_accu / test_samp
-                        g_loss_test = test_loss / test_samp
-                        summaryWriter.add_scalar("test/loss", g_loss_test, iter_num)
-                        summaryWriter.add_scalar("test/accuracy", g_accuracy_test, iter_num)
+                    acc_test = test_accu / test_samp
+
+                    for metric_name, _ in metrics.items():
+                        summaryWriter.add_scalar("test/" + metric_name, validation_results[metric_name], iter_num)
+                    
+                    g_accuracy_test = validation_results['accuracy']
+                    # g_loss_test = validation_results['loss']
+
+                    model_metrics_dict = {
+                        "nepochs": args.nepochs,
+                        "nbatches": nbatches,
+                        "nbatches_test": nbatches_test,
+                        "state_dict": dlrm.state_dict(),
+                        "test_acc": acc_test,
+                    }
+                    # else:
+                    #     g_accuracy_test = test_accu / test_samp
+                    #     g_loss_test = test_loss / test_samp
+                    #     summaryWriter.add_scalar("test/loss", g_loss_test, iter_num)
+                    #     summaryWriter.add_scalar("test/accuracy", g_accuracy_test, iter_num)
 
                     is_best = g_accuracy_test > best_gA_test
+                    # is_best = acc_test > best_acc_test
                     if is_best:
                         best_gA_test = g_accuracy_test
                         if not (args.save_model == ""):
@@ -1289,7 +1304,7 @@ if __name__ == "__main__":
                                     "train_acc": g_accuracy,
                                     "train_loss": g_loss,
                                     "test_acc": g_accuracy_test,
-                                    "test_loss": g_loss_test,
+                                    # "test_loss": g_loss_test,
                                     "total_loss": total_loss,
                                     "total_accu": total_accu,
                                     "opt_state_dict": optimizer.state_dict(),
@@ -1297,38 +1312,38 @@ if __name__ == "__main__":
                                 args.save_model,
                             )
 
-                    if args.mlperf_logging:
-                        is_best = validation_results['roc_auc'] > best_auc_test
-                        if is_best:
-                            best_auc_test = validation_results['roc_auc']
+                    # if args.mlperf_logging:
+                    #     is_best = validation_results['roc_auc'] > best_auc_test
+                    #     if is_best:
+                    #         best_auc_test = validation_results['roc_auc']
 
-                        print(
-                            "Testing at - {}/{} of epoch {},".format(j + 1, nbatches, k)
-                            + " loss {:.6f}, recall {:.4f}, precision {:.4f},".format(
-                                validation_results['loss'],
-                                validation_results['recall'],
-                                validation_results['precision']
-                            )
-                            + " f1 {:.4f}, ap {:.4f},".format(
-                                validation_results['f1'],
-                                validation_results['ap'],
-                            )
-                            + " auc {:.4f}, best auc {:.4f},".format(
-                                validation_results['roc_auc'],
-                                best_auc_test
-                            )
-                            + " accuracy {:3.3f} %, best accuracy {:3.3f} %".format(
-                                validation_results['accuracy'] * 100,
-                                best_gA_test * 100
-                            )
+                    #     print(
+                    #         "Testing at - {}/{} of epoch {},".format(j + 1, nbatches, k)
+                    #         + " loss {:.6f}, recall {:.4f}, precision {:.4f},".format(
+                    #             validation_results['loss'],
+                    #             validation_results['recall'],
+                    #             validation_results['precision']
+                    #         )
+                    #         + " f1 {:.4f}, ap {:.4f},".format(
+                    #             validation_results['f1'],
+                    #             validation_results['ap'],
+                    #         )
+                    #         + " auc {:.4f}, best auc {:.4f},".format(
+                    #             validation_results['roc_auc'],
+                    #             best_auc_test
+                    #         )
+                    #         + " accuracy {:3.3f} %, best accuracy {:3.3f} %".format(
+                    #             validation_results['accuracy'] * 100,
+                    #             best_gA_test * 100
+                    #         )
+                    #     )
+                    # else:
+                    print(
+                        "Testing at - {}/{} of epoch {},".format(j + 1, nbatches, 0)
+                        + " accuracy {:3.3f} %, auc {:3.3f} %, best {:3.3f} %".format(
+                            g_accuracy_test * 100, validation_results['roc_auc'] * 100, best_gA_test * 100
                         )
-                    else:
-                        print(
-                            "Testing at - {}/{} of epoch {},".format(j + 1, nbatches, 0)
-                            + " loss {:.6f}, accuracy {:3.3f} %, best {:3.3f} %".format(
-                                g_loss_test, g_accuracy_test * 100, best_gA_test * 100
-                            )
-                        )
+                    )
                     # Uncomment the line below to print out the total time with overhead
                     # print("Total test time for this group: {}" \
                     # .format(time_wrap(use_gpu) - accum_test_time_begin))
